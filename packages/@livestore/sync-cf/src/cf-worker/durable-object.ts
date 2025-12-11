@@ -447,8 +447,10 @@ const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClien
     UnexpectedError
   > =>
     Effect.gen(function* () {
-      const whereClause = cursor === undefined ? '' : `WHERE seqNum > ${cursor}`
-      const sql = `SELECT * FROM ${dbName} ${whereClause} ORDER BY seqNum ASC`
+      const sql =
+        cursor === undefined
+          ? `SELECT * FROM ${dbName} ORDER BY seqNum ASC`
+          : `SELECT * FROM ${dbName} WHERE seqNum > ${cursor} ORDER BY seqNum ASC`
       // TODO handle case where `cursor` was not found
       const rawEvents = yield* execDb((db) => db.query(sql))
       const events = Schema.decodeUnknownSync(Schema.Array(eventlogTableSQLite.rowSchema))(rawEvents).map(
@@ -465,17 +467,26 @@ const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClien
       // If there are no events, do nothing.
       if (batch.length === 0) return
 
-      // CF D1 limits:
+      // PostgreSQL limits:
       // Maximum bound parameters per query	100, Maximum arguments per SQL function	32
       // Thus we need to split the batch into chunks of max (100/7=)14 events each.
       const CHUNK_SIZE = 14
+      const COLUMNS_PER_EVENT = 7
 
       for (let i = 0; i < batch.length; i += CHUNK_SIZE) {
         const chunk = batch.slice(i, i + CHUNK_SIZE)
 
-        // Create a list of placeholders ("(?, ?, ?, ?, ?, ?, ?)"), corresponding to each event.
-        const valuesPlaceholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')
+        // Create PostgreSQL-style placeholders: ($1, $2, $3, $4, $5, $6, $7), ($8, $9, ...)
+        const valuesPlaceholders = chunk
+          .map((_, eventIndex) => {
+            const startParam = eventIndex * COLUMNS_PER_EVENT + 1
+            const params = Array.from({ length: COLUMNS_PER_EVENT }, (_, j) => `$${startParam + j}`)
+            return `(${params.join(', ')})`
+          })
+          .join(', ')
+
         const sql = `INSERT INTO ${dbName} (seqNum, parentSeqNum, args, name, createdAt, clientId, sessionId) VALUES ${valuesPlaceholders}`
+        console.log('🐘🔌 sql insert', sql, valuesPlaceholders)
         // Flatten the event properties into a parameters array.
         const params = chunk.flatMap((event) => [
           event.seqNum,
