@@ -1,4 +1,4 @@
-import { makeColumnSpec, UnexpectedError } from '@livestore/common'
+import { UnexpectedError } from '@livestore/common'
 import { EventSequenceNumber, type LiveStoreEvent, State } from '@livestore/common/schema'
 import { shouldNeverHappen } from '@livestore/utils'
 import { Effect, Logger, LogLevel, Option, Schema } from '@livestore/utils/effect'
@@ -23,8 +23,38 @@ const encodeOutgoingMessage = Schema.encodeSync(Schema.parseJson(WSMessage.Backe
 const encodeIncomingMessage = Schema.encodeSync(Schema.parseJson(WSMessage.ClientToBackendMessage))
 const decodeIncomingMessage = Schema.decodeUnknownEither(Schema.parseJson(WSMessage.ClientToBackendMessage))
 
-export const eventlogTable = State.SQLite.table({
+// PostgreSQL column type definitions
+type PostgresColumnType = 'INTEGER' | 'TEXT' | 'JSONB' | 'BIGINT'
+
+type PostgresColumnDef = {
+  name: string
+  type: PostgresColumnType
+  primaryKey?: boolean
+  nullable?: boolean
+}
+
+type PostgresTableDef = {
+  name: string
+  columns: ReadonlyArray<PostgresColumnDef>
+}
+
+// PostgreSQL table definition for eventlog
+export const eventlogTable: PostgresTableDef = {
   // NOTE actual table name is determined at runtime
+  name: 'eventlog_${PERSISTENCE_FORMAT_VERSION}_${storeId}',
+  columns: [
+    { name: 'seqNum', type: 'BIGINT', primaryKey: true },
+    { name: 'parentSeqNum', type: 'BIGINT' },
+    { name: 'name', type: 'TEXT' },
+    { name: 'args', type: 'JSONB', nullable: true },
+    { name: 'createdAt', type: 'TEXT' },
+    { name: 'clientId', type: 'TEXT' },
+    { name: 'sessionId', type: 'TEXT' },
+  ],
+}
+
+// Keep the SQLite table for schema validation (used in getEvents)
+const eventlogTableSQLite = State.SQLite.table({
   name: 'eventlog_${PERSISTENCE_FORMAT_VERSION}_${storeId}',
   columns: {
     seqNum: State.SQLite.integer({ primaryKey: true, schema: EventSequenceNumber.GlobalEventSequenceNumber }),
@@ -103,9 +133,9 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
 
         console.log('🐘 setWebSocketAutoResponse')
 
-        const colSpec = makeColumnSpec(eventlogTable.sqliteDef.ast)
+        const colSpec = postgresTableToColumnSpec(eventlogTable)
         console.log('🐘🔌 colSpec', colSpec)
-        await pgClient.query(`CREATE TABLE IF NOT EXISTS ${storage.dbName} (${colSpec}) strict`)
+        await createPostgresTable(pgClient, storage.dbName, colSpec)
 
         console.log('🐘🔌 table created')
 
@@ -347,6 +377,47 @@ type SyncStorage = {
   resetStore: Effect.Effect<void, UnexpectedError>
 }
 
+/**
+ * Converts a PostgreSQL table definition to a column specification string.
+ * @param tableDef - PostgreSQL table definition
+ * @returns Column specification string for CREATE TABLE
+ */
+const postgresTableToColumnSpec = (tableDef: PostgresTableDef): string => {
+  const primaryKeys: string[] = []
+  const columnDefs = tableDef.columns.map((col) => {
+    let def = `${col.name} ${col.type}`
+
+    if (col.primaryKey) {
+      primaryKeys.push(col.name)
+    }
+
+    // Primary keys are always NOT NULL, and columns are NOT NULL unless explicitly nullable: true
+    if (col.primaryKey || col.nullable !== true) {
+      def += ' NOT NULL'
+    }
+
+    return def
+  })
+
+  if (primaryKeys.length > 0) {
+    columnDefs.push(`PRIMARY KEY (${primaryKeys.join(', ')})`)
+  }
+
+  return columnDefs.join(', ')
+}
+
+/**
+ * Creates a PostgreSQL table with a raw column specification string.
+ * @param pgClient - PostgreSQL client instance
+ * @param tableName - Name of the table to create
+ * @param columnSpec - Raw PostgreSQL column specification string (e.g., "seqNum INTEGER PRIMARY KEY, name TEXT")
+ */
+const createPostgresTable = async (pgClient: Client, tableName: string, columnSpec: string): Promise<void> => {
+  const sql = `CREATE TABLE IF NOT EXISTS ${tableName} (${columnSpec})`
+  console.log('🐘🔌 sql', sql)
+  await pgClient.query(sql)
+}
+
 const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClient: Client): SyncStorage => {
   const dbName = `eventlog_${PERSISTENCE_FORMAT_VERSION}_${toValidTableName(storeId)}`
 
@@ -380,7 +451,7 @@ const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClien
       const sql = `SELECT * FROM ${dbName} ${whereClause} ORDER BY seqNum ASC`
       // TODO handle case where `cursor` was not found
       const rawEvents = yield* execDb((db) => db.query(sql))
-      const events = Schema.decodeUnknownSync(Schema.Array(eventlogTable.rowSchema))(rawEvents).map(
+      const events = Schema.decodeUnknownSync(Schema.Array(eventlogTableSQLite.rowSchema))(rawEvents).map(
         ({ createdAt, ...eventEncoded }) => ({
           eventEncoded,
           metadata: Option.some({ createdAt }),
