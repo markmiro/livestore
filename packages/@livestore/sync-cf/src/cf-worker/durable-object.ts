@@ -3,12 +3,17 @@ import { EventSequenceNumber, type LiveStoreEvent, State } from '@livestore/comm
 import { shouldNeverHappen } from '@livestore/utils'
 import { Effect, Logger, LogLevel, Option, Schema } from '@livestore/utils/effect'
 import { DurableObject } from 'cloudflare:workers'
+import type { QueryResult } from 'pg'
+import { Client } from 'pg'
 
 import { WSMessage } from '../common/mod.js'
 import type { SyncMetadata } from '../common/ws-message-types.js'
 
+type DB = Client
+
 export interface Env {
-  DB: D1Database
+  // DB: D1Database
+  PG_CONNECTION_STRING: string
   ADMIN_SECRET: string
 }
 
@@ -67,9 +72,18 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
     private currentHead: EventSequenceNumber.GlobalEventSequenceNumber | 'uninitialized' = 'uninitialized'
 
     fetch = async (request: Request) =>
-      Effect.sync(() => {
+      Effect.sync(async () => {
         const storeId = getStoreId(request)
-        const storage = makeStorage(this.ctx, this.env, storeId)
+
+        const pgClient = new Client({
+          connectionString: this.env.PG_CONNECTION_STRING,
+        })
+        // Connect to the PostgreSQL database
+        await pgClient.connect()
+        console.log('🐘 PostgreSQL client connected')
+
+        const storage = makeStorage(this.ctx, this.env, storeId, pgClient)
+        console.log('🐘🔌 storage created')
 
         const { 0: client, 1: server } = new WebSocketPair()
 
@@ -87,8 +101,13 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
           ),
         )
 
+        console.log('🐘 setWebSocketAutoResponse')
+
         const colSpec = makeColumnSpec(eventlogTable.sqliteDef.ast)
-        this.env.DB.exec(`CREATE TABLE IF NOT EXISTS ${storage.dbName} (${colSpec}) strict`)
+        console.log('🐘🔌 colSpec', colSpec)
+        await pgClient.query(`CREATE TABLE IF NOT EXISTS ${storage.dbName} (${colSpec}) strict`)
+
+        console.log('🐘🔌 table created')
 
         return new Response(null, {
           status: 101,
@@ -109,8 +128,16 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
       const requestId = decodedMessage.requestId
 
       return Effect.gen(this, function* () {
+        console.log('🐘🔌 PostgreSQL client connecting 2')
+        const pgClient = new Client({
+          connectionString: this.env.PG_CONNECTION_STRING,
+        })
+        // Connect to the PostgreSQL database
+        yield* Effect.promise(() => pgClient.connect())
+        console.log('🐘🔌 PostgreSQL client connected 2')
+
         const { storeId } = yield* Schema.decode(WebSocketAttachmentSchema)(ws.deserializeAttachment())
-        const storage = makeStorage(this.ctx, this.env, storeId)
+        const storage = makeStorage(this.ctx, this.env, storeId, pgClient)
 
         try {
           switch (decodedMessage._tag) {
@@ -282,7 +309,7 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
           ws.send(encodeOutgoingMessage(WSMessage.Error.make({ message: error.message, requestId })))
         }
       }).pipe(
-        Effect.withSpan(`@livestore/sync-cf:durable-object:webSocketMessage:${decodedMessage._tag}`, {
+        Effect.withSpan(`@livestore/sync-cf:postgres:webSocketMessage:${decodedMessage._tag}`, {
           attributes: { requestId },
         }),
         Effect.tapCauseLogPretty,
@@ -292,7 +319,7 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
           ),
         ),
         Logger.withMinimumLogLevel(LogLevel.Debug),
-        Effect.provide(Logger.prettyWithThread('durable-object')),
+        Effect.provide(Logger.prettyWithThread('postgres')),
         Effect.runPromise,
       )
     }
@@ -320,16 +347,16 @@ type SyncStorage = {
   resetStore: Effect.Effect<void, UnexpectedError>
 }
 
-const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string): SyncStorage => {
+const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClient: Client): SyncStorage => {
   const dbName = `eventlog_${PERSISTENCE_FORMAT_VERSION}_${toValidTableName(storeId)}`
 
-  const execDb = <T>(cb: (db: D1Database) => Promise<D1Result<T>>) =>
+  const execDb = <T>(cb: (db: DB) => Promise<QueryResult<T[]>>) =>
     Effect.tryPromise({
-      try: () => cb(env.DB),
+      try: () => cb(pgClient),
       catch: (error) => new UnexpectedError({ cause: error, payload: { dbName } }),
     }).pipe(
-      Effect.map((_) => _.results),
-      Effect.withSpan('@livestore/sync-cf:durable-object:execDb'),
+      Effect.map((_) => _.rows),
+      Effect.withSpan('@livestore/sync-cf:postgres:execDb'),
     )
 
   // const getHead: Effect.Effect<EventSequenceNumber.GlobalEventSequenceNumber, UnexpectedError> = Effect.gen(
@@ -352,7 +379,7 @@ const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string): SyncSt
       const whereClause = cursor === undefined ? '' : `WHERE seqNum > ${cursor}`
       const sql = `SELECT * FROM ${dbName} ${whereClause} ORDER BY seqNum ASC`
       // TODO handle case where `cursor` was not found
-      const rawEvents = yield* execDb((db) => db.prepare(sql).all())
+      const rawEvents = yield* execDb((db) => db.query(sql))
       const events = Schema.decodeUnknownSync(Schema.Array(eventlogTable.rowSchema))(rawEvents).map(
         ({ createdAt, ...eventEncoded }) => ({
           eventEncoded,
@@ -389,12 +416,7 @@ const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string): SyncSt
           event.sessionId,
         ])
 
-        yield* execDb((db) =>
-          db
-            .prepare(sql)
-            .bind(...params)
-            .run(),
-        )
+        yield* execDb((db) => db.query(sql, params))
       }
     }).pipe(UnexpectedError.mapToUnexpectedError)
 
@@ -422,3 +444,7 @@ const getStoreId = (request: Request) => {
 }
 
 const toValidTableName = (str: string) => str.replaceAll(/[^a-zA-Z0-9]/g, '_')
+
+export const foobar = () => {
+  return 'foobar'
+}
