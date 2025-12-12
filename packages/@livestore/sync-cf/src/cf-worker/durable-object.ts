@@ -466,15 +466,29 @@ const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClien
           : `SELECT * FROM ${dbName} WHERE seqNum > ${cursor} ORDER BY seqNum ASC`
       // TODO handle case where `cursor` was not found
       console.log('🐘🔌 getEvents, sql', sql)
+
       const rawEvents = yield* execDb((db) => db.query(sql))
       console.log('🐘🔌 getEvents, rawEvents', rawEvents)
-      const events = Schema.decodeUnknownSync(Schema.Array(eventlogTableSQLite.rowSchema))(rawEvents).map(
+
+      const modifiedEvents = rawEvents.map((event: any) => ({
+        seqNum: Number.parseInt(event.seqnum),
+        parentSeqNum: Number.parseInt(event.parentseqnum),
+        name: event.name,
+        args: JSON.stringify(event.args),
+        createdAt: event.createdat,
+        clientId: event.clientid,
+        sessionId: event.sessionid,
+      }))
+      console.log('🐘🔌 getEvents, modifiedEvents', modifiedEvents)
+
+      const events = Schema.decodeUnknownSync(Schema.Array(eventlogTableSQLite.rowSchema))(modifiedEvents).map(
         ({ createdAt, ...eventEncoded }) => ({
           eventEncoded,
           metadata: Option.some({ createdAt }),
         }),
       )
       console.log('🐘🔌 getEvents, events', events)
+
       return events
     }).pipe(UnexpectedError.mapToUnexpectedError)
 
