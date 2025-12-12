@@ -556,7 +556,3 @@ const getStoreId = (request: Request) => {
 }
 
 const toValidTableName = (str: string) => str.replaceAll(/[^a-zA-Z0-9]/g, '_')
-
-export const foobar = () => {
-  return 'foobar'
-}
