@@ -174,9 +174,11 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
             // TODO allow pulling concurrently to not block incoming push requests
             case 'WSMessage.PullReq': {
               if (options?.onPull) {
+                console.log('🐘🔌 onPull', decodedMessage)
                 yield* Effect.tryAll(() => options.onPull!(decodedMessage))
               }
 
+              console.log('🐘🔌 before respond')
               const respond = (message: WSMessage.PullRes) =>
                 Effect.gen(function* () {
                   if (options?.onPullRes) {
@@ -185,10 +187,16 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
                   ws.send(encodeOutgoingMessage(message))
                 })
 
+              console.log('🐘🔌 after respond')
+
               const cursor = decodedMessage.cursor
+
+              console.log('🐘🔌 before getEvents, cursor', cursor)
 
               // TODO use streaming
               const remainingEvents = yield* storage.getEvents(cursor)
+
+              console.log('🐘🔌 after getEvents')
 
               // Send at least one response, even if there are no events
               const batches =
@@ -198,10 +206,14 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
                       remainingEvents.slice(i * PULL_CHUNK_SIZE, (i + 1) * PULL_CHUNK_SIZE),
                     )
 
+              console.log('🐘🔌 after batches')
+
               for (const [index, batch] of batches.entries()) {
                 const remaining = Math.max(0, remainingEvents.length - (index + 1) * PULL_CHUNK_SIZE)
                 yield* respond(WSMessage.PullRes.make({ batch, remaining, requestId: { context: 'pull', requestId } }))
               }
+
+              console.log('🐘🔌 after for loop')
 
               break
             }
@@ -447,18 +459,22 @@ const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClien
     UnexpectedError
   > =>
     Effect.gen(function* () {
+      console.log('🐘🔌 getEvents, cursor', cursor)
       const sql =
         cursor === undefined
           ? `SELECT * FROM ${dbName} ORDER BY seqNum ASC`
           : `SELECT * FROM ${dbName} WHERE seqNum > ${cursor} ORDER BY seqNum ASC`
       // TODO handle case where `cursor` was not found
+      console.log('🐘🔌 getEvents, sql', sql)
       const rawEvents = yield* execDb((db) => db.query(sql))
+      console.log('🐘🔌 getEvents, rawEvents', rawEvents)
       const events = Schema.decodeUnknownSync(Schema.Array(eventlogTableSQLite.rowSchema))(rawEvents).map(
         ({ createdAt, ...eventEncoded }) => ({
           eventEncoded,
           metadata: Option.some({ createdAt }),
         }),
       )
+      console.log('🐘🔌 getEvents, events', events)
       return events
     }).pipe(UnexpectedError.mapToUnexpectedError)
 
@@ -486,7 +502,7 @@ const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClien
           .join(', ')
 
         const sql = `INSERT INTO ${dbName} (seqNum, parentSeqNum, args, name, createdAt, clientId, sessionId) VALUES ${valuesPlaceholders}`
-        console.log('🐘🔌 sql insert', sql, valuesPlaceholders)
+        console.log('🐘🔌 sql insert', { sql, valuesPlaceholders })
         // Flatten the event properties into a parameters array.
         const params = chunk.flatMap((event) => [
           event.seqNum,
