@@ -1,5 +1,5 @@
 import { UnexpectedError } from '@livestore/common'
-import { EventSequenceNumber, type LiveStoreEvent, State } from '@livestore/common/schema'
+import { EventSequenceNumber, type LiveStoreEvent } from '@livestore/common/schema'
 import { shouldNeverHappen } from '@livestore/utils'
 import { Effect, Logger, LogLevel, Option, Schema } from '@livestore/utils/effect'
 import { DurableObject } from 'cloudflare:workers'
@@ -52,21 +52,6 @@ export const eventlogTable: PostgresTableDef = {
     { name: 'sessionId', type: 'TEXT' },
   ],
 }
-
-// Keep the SQLite table for schema validation (used in getEvents)
-const eventlogTableSQLite = State.SQLite.table({
-  name: 'eventlog_${PERSISTENCE_FORMAT_VERSION}_${storeId}',
-  columns: {
-    seqNum: State.SQLite.integer({ primaryKey: true, schema: EventSequenceNumber.GlobalEventSequenceNumber }),
-    parentSeqNum: State.SQLite.integer({ schema: EventSequenceNumber.GlobalEventSequenceNumber }),
-    name: State.SQLite.text({}),
-    args: State.SQLite.text({ schema: Schema.parseJson(Schema.Any), nullable: true }),
-    /** ISO date format. Currently only used for debugging purposes. */
-    createdAt: State.SQLite.text({}),
-    clientId: State.SQLite.text({}),
-    sessionId: State.SQLite.text({}),
-  },
-})
 
 const WebSocketAttachmentSchema = Schema.parseJson(
   Schema.Struct({
@@ -433,7 +418,7 @@ const createPostgresTable = async (pgClient: Client, tableName: string, columnSp
 const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClient: Client): SyncStorage => {
   const dbName = `eventlog_${PERSISTENCE_FORMAT_VERSION}_${toValidTableName(storeId)}`
 
-  const execDb = <T>(cb: (db: DB) => Promise<QueryResult<T[]>>) =>
+  const execDb = <T>(cb: (db: DB) => Promise<QueryResult<T & { rows: T[] }>>) =>
     Effect.tryPromise({
       try: () => cb(pgClient),
       catch: (error) => new UnexpectedError({ cause: error, payload: { dbName } }),
@@ -467,26 +452,34 @@ const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClien
       // TODO handle case where `cursor` was not found
       console.log('🐘🔌 getEvents, sql', sql)
 
-      const rawEvents = yield* execDb((db) => db.query(sql))
+      type RawEvent = {
+        seqnum: string
+        parentseqnum: string
+        name: string
+        args: string
+        createdat: string
+        clientid: string
+        sessionid: string
+      }
+
+      const rawEvents = yield* execDb<RawEvent>((db) => db.query(sql))
       console.log('🐘🔌 getEvents, rawEvents', rawEvents)
 
-      const modifiedEvents = rawEvents.map((event: any) => ({
-        seqNum: Number.parseInt(event.seqnum),
-        parentSeqNum: Number.parseInt(event.parentseqnum),
-        name: event.name,
-        args: JSON.stringify(event.args),
-        createdAt: event.createdat,
-        clientId: event.clientid,
-        sessionId: event.sessionid,
+      const events: {
+        eventEncoded: LiveStoreEvent.AnyEncodedGlobal
+        metadata: Option.Option<SyncMetadata>
+      }[] = rawEvents.map((event) => ({
+        eventEncoded: {
+          seqNum: Number(event.seqnum) as EventSequenceNumber.GlobalEventSequenceNumber,
+          parentSeqNum: Number(event.parentseqnum) as EventSequenceNumber.GlobalEventSequenceNumber,
+          name: event.name,
+          args: event.args,
+          clientId: event.clientid,
+          sessionId: event.sessionid,
+        },
+        metadata: Option.some({ createdAt: event.createdat }),
       }))
-      console.log('🐘🔌 getEvents, modifiedEvents', modifiedEvents)
 
-      const events = Schema.decodeUnknownSync(Schema.Array(eventlogTableSQLite.rowSchema))(modifiedEvents).map(
-        ({ createdAt, ...eventEncoded }) => ({
-          eventEncoded,
-          metadata: Option.some({ createdAt }),
-        }),
-      )
       console.log('🐘🔌 getEvents, events', events)
 
       return events
