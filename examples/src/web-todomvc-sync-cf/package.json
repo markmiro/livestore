@@ -1,8 +1,15 @@
 {
   "name": "livestore-example-src-web-todomvc-sync-cf",
   "version": "0.0.0",
-  "type": "module",
   "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "VITE_LIVESTORE_SYNC_URL=http://localhost:8787 vite --force",
+    "preview": "vite preview",
+    "test": "playwright test",
+    "wrangler:deploy": "wrangler deploy"
+  },
   "dependencies": {
     "@livestore/adapter-web": "workspace:*",
     "@livestore/devtools-vite": "0.3.1-dev.0",
@@ -12,6 +19,7 @@
     "@livestore/sync-cf": "workspace:*",
     "@livestore/wa-sqlite": "1.0.5-dev.2",
     "@overengineering/fps-meter": "0.1.2",
+    "@playwright/test": "^1.56.0",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "todomvc-app-css": "2.4.3"
@@ -26,11 +34,5 @@
   },
   "engines": {
     "node": ">=23.0.0"
-  },
-  "scripts": {
-    "build": "vite build",
-    "dev": "VITE_LIVESTORE_SYNC_URL=http://localhost:8787 vite --force",
-    "preview": "vite preview",
-    "wrangler:deploy": "wrangler deploy"
   }
 }
