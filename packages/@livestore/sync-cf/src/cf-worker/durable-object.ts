@@ -1,4 +1,3 @@
-import { UnexpectedError } from '@livestore/common'
 import { EventSequenceNumber, type LiveStoreEvent } from '@livestore/common/schema'
 import { shouldNeverHappen } from '@livestore/utils'
 import { Effect, Logger, LogLevel, Option, Schema } from '@livestore/utils/effect'
@@ -8,6 +7,7 @@ import { Client } from 'pg'
 
 import { WSMessage } from '../common/mod.js'
 import type { SyncMetadata } from '../common/ws-message-types.js'
+import { UnexpectedError } from '@livestore/common'
 
 type DB = Client
 
@@ -360,26 +360,26 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
 
 type SyncStorage = {
   dbName: string
-  // getHead: Effect.Effect<EventSequenceNumber.GlobalEventSequenceNumber, UnexpectedError>
   getEvents: (
     cursor: number | undefined,
   ) => Effect.Effect<
-    ReadonlyArray<{ eventEncoded: LiveStoreEvent.AnyEncodedGlobal; metadata: Option.Option<SyncMetadata> }>,
-    UnexpectedError
+  ReadonlyArray<{ eventEncoded: LiveStoreEvent.AnyEncodedGlobal; metadata: Option.Option<SyncMetadata> }>,
   >
   appendEvents: (
     batch: ReadonlyArray<LiveStoreEvent.AnyEncodedGlobal>,
     createdAt: string,
-  ) => Effect.Effect<void, UnexpectedError>
-  resetStore: Effect.Effect<void, UnexpectedError>
-}
-
-/**
- * Converts a PostgreSQL table definition to a column specification string.
- * @param tableDef - PostgreSQL table definition
- * @returns Column specification string for CREATE TABLE
- */
-const postgresTableToColumnSpec = (tableDef: PostgresTableDef): string => {
+    resetStore: Effect.Effect<void, UnexpectedError>
+    // getHead: Effect.Effect<EventSequenceNumber.GlobalEventSequenceNumber, UnexpectedError>
+    }
+    
+    /**
+     * Converts a PostgreSQL table definition to a column specification string.
+    UnexpectedError
+   * @param tableDef - PostgreSQL table definition
+   * @returns Column specification string for CREATE TABLE
+  */
+ const postgresTableToColumnSpec = (tableDef: PostgresTableDef): string => {
+) => Effect.Effect<void, UnexpectedError>
   const primaryKeys: string[] = []
   const columnDefs = tableDef.columns.map((col) => {
     let def = `${col.name} ${col.type}`

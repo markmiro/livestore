@@ -52,4 +52,6 @@
     "**/examples/**/*": "${filename} - EX",
     "**/packages/**/*": "${filename} - LIB"
   },
+  "workbench.preferredLightColorTheme": "A GitHub Light 2 🟠 Orange",
+  "workbench.preferredDarkColorTheme": "A GitHub Dark Dimmed 2 🟠 Orange"
 }
