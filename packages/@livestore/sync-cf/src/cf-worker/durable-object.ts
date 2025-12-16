@@ -1,19 +1,14 @@
-import { EventSequenceNumber, type LiveStoreEvent } from '@livestore/common/schema'
+import { makeColumnSpec, UnexpectedError } from '@livestore/common'
+import { EventSequenceNumber, type LiveStoreEvent, State } from '@livestore/common/schema'
 import { shouldNeverHappen } from '@livestore/utils'
 import { Effect, Logger, LogLevel, Option, Schema } from '@livestore/utils/effect'
 import { DurableObject } from 'cloudflare:workers'
-import type { QueryResult } from 'pg'
-import { Client } from 'pg'
 
 import { WSMessage } from '../common/mod.js'
 import type { SyncMetadata } from '../common/ws-message-types.js'
-import { UnexpectedError } from '@livestore/common'
-
-type DB = Client
 
 export interface Env {
-  // DB: D1Database
-  PG_CONNECTION_STRING: string
+  DB: D1Database
   ADMIN_SECRET: string
 }
 
@@ -23,35 +18,20 @@ const encodeOutgoingMessage = Schema.encodeSync(Schema.parseJson(WSMessage.Backe
 const encodeIncomingMessage = Schema.encodeSync(Schema.parseJson(WSMessage.ClientToBackendMessage))
 const decodeIncomingMessage = Schema.decodeUnknownEither(Schema.parseJson(WSMessage.ClientToBackendMessage))
 
-// PostgreSQL column type definitions
-type PostgresColumnType = 'INTEGER' | 'TEXT' | 'JSONB' | 'BIGINT'
-
-type PostgresColumnDef = {
-  name: string
-  type: PostgresColumnType
-  primaryKey?: boolean
-  nullable?: boolean
-}
-
-type PostgresTableDef = {
-  name: string
-  columns: ReadonlyArray<PostgresColumnDef>
-}
-
-// PostgreSQL table definition for eventlog
-export const eventlogTable: PostgresTableDef = {
+export const eventlogTable = State.SQLite.table({
   // NOTE actual table name is determined at runtime
   name: 'eventlog_${PERSISTENCE_FORMAT_VERSION}_${storeId}',
-  columns: [
-    { name: 'seqNum', type: 'BIGINT', primaryKey: true },
-    { name: 'parentSeqNum', type: 'BIGINT' },
-    { name: 'name', type: 'TEXT' },
-    { name: 'args', type: 'JSONB', nullable: true },
-    { name: 'createdAt', type: 'TEXT' },
-    { name: 'clientId', type: 'TEXT' },
-    { name: 'sessionId', type: 'TEXT' },
-  ],
-}
+  columns: {
+    seqNum: State.SQLite.integer({ primaryKey: true, schema: EventSequenceNumber.GlobalEventSequenceNumber }),
+    parentSeqNum: State.SQLite.integer({ schema: EventSequenceNumber.GlobalEventSequenceNumber }),
+    name: State.SQLite.text({}),
+    args: State.SQLite.text({ schema: Schema.parseJson(Schema.Any), nullable: true }),
+    /** ISO date format. Currently only used for debugging purposes. */
+    createdAt: State.SQLite.text({}),
+    clientId: State.SQLite.text({}),
+    sessionId: State.SQLite.text({}),
+  },
+})
 
 const WebSocketAttachmentSchema = Schema.parseJson(
   Schema.Struct({
@@ -87,18 +67,9 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
     private currentHead: EventSequenceNumber.GlobalEventSequenceNumber | 'uninitialized' = 'uninitialized'
 
     fetch = async (request: Request) =>
-      Effect.sync(async () => {
+      Effect.sync(() => {
         const storeId = getStoreId(request)
-
-        const pgClient = new Client({
-          connectionString: this.env.PG_CONNECTION_STRING,
-        })
-        // Connect to the PostgreSQL database
-        await pgClient.connect()
-        console.log('🐘 PostgreSQL client connected')
-
-        const storage = makeStorage(this.ctx, this.env, storeId, pgClient)
-        console.log('🐘🔌 storage created')
+        const storage = makeStorage(this.ctx, this.env, storeId)
 
         const { 0: client, 1: server } = new WebSocketPair()
 
@@ -116,13 +87,8 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
           ),
         )
 
-        console.log('🐘 setWebSocketAutoResponse')
-
-        const colSpec = postgresTableToColumnSpec(eventlogTable)
-        console.log('🐘🔌 colSpec', colSpec)
-        await createPostgresTable(pgClient, storage.dbName, colSpec)
-
-        console.log('🐘🔌 table created')
+        const colSpec = makeColumnSpec(eventlogTable.sqliteDef.ast)
+        this.env.DB.exec(`CREATE TABLE IF NOT EXISTS ${storage.dbName} (${colSpec}) strict`)
 
         return new Response(null, {
           status: 101,
@@ -143,27 +109,17 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
       const requestId = decodedMessage.requestId
 
       return Effect.gen(this, function* () {
-        console.log('🐘🔌 PostgreSQL client connecting 2')
-        const pgClient = new Client({
-          connectionString: this.env.PG_CONNECTION_STRING,
-        })
-        // Connect to the PostgreSQL database
-        yield* Effect.promise(() => pgClient.connect())
-        console.log('🐘🔌 PostgreSQL client connected 2')
-
         const { storeId } = yield* Schema.decode(WebSocketAttachmentSchema)(ws.deserializeAttachment())
-        const storage = makeStorage(this.ctx, this.env, storeId, pgClient)
+        const storage = makeStorage(this.ctx, this.env, storeId)
 
         try {
           switch (decodedMessage._tag) {
             // TODO allow pulling concurrently to not block incoming push requests
             case 'WSMessage.PullReq': {
               if (options?.onPull) {
-                console.log('🐘🔌 onPull', decodedMessage)
                 yield* Effect.tryAll(() => options.onPull!(decodedMessage))
               }
 
-              console.log('🐘🔌 before respond')
               const respond = (message: WSMessage.PullRes) =>
                 Effect.gen(function* () {
                   if (options?.onPullRes) {
@@ -172,16 +128,10 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
                   ws.send(encodeOutgoingMessage(message))
                 })
 
-              console.log('🐘🔌 after respond')
-
               const cursor = decodedMessage.cursor
-
-              console.log('🐘🔌 before getEvents, cursor', cursor)
 
               // TODO use streaming
               const remainingEvents = yield* storage.getEvents(cursor)
-
-              console.log('🐘🔌 after getEvents')
 
               // Send at least one response, even if there are no events
               const batches =
@@ -191,14 +141,10 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
                       remainingEvents.slice(i * PULL_CHUNK_SIZE, (i + 1) * PULL_CHUNK_SIZE),
                     )
 
-              console.log('🐘🔌 after batches')
-
               for (const [index, batch] of batches.entries()) {
                 const remaining = Math.max(0, remainingEvents.length - (index + 1) * PULL_CHUNK_SIZE)
                 yield* respond(WSMessage.PullRes.make({ batch, remaining, requestId: { context: 'pull', requestId } }))
               }
-
-              console.log('🐘🔌 after for loop')
 
               break
             }
@@ -336,7 +282,7 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
           ws.send(encodeOutgoingMessage(WSMessage.Error.make({ message: error.message, requestId })))
         }
       }).pipe(
-        Effect.withSpan(`@livestore/sync-cf:postgres:webSocketMessage:${decodedMessage._tag}`, {
+        Effect.withSpan(`@livestore/sync-cf:durable-object:webSocketMessage:${decodedMessage._tag}`, {
           attributes: { requestId },
         }),
         Effect.tapCauseLogPretty,
@@ -346,7 +292,7 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
           ),
         ),
         Logger.withMinimumLogLevel(LogLevel.Debug),
-        Effect.provide(Logger.prettyWithThread('postgres')),
+        Effect.provide(Logger.prettyWithThread('durable-object')),
         Effect.runPromise,
       )
     }
@@ -360,71 +306,30 @@ export const makeDurableObject: MakeDurableObjectClass = (options) => {
 
 type SyncStorage = {
   dbName: string
+  // getHead: Effect.Effect<EventSequenceNumber.GlobalEventSequenceNumber, UnexpectedError>
   getEvents: (
     cursor: number | undefined,
   ) => Effect.Effect<
-  ReadonlyArray<{ eventEncoded: LiveStoreEvent.AnyEncodedGlobal; metadata: Option.Option<SyncMetadata> }>,
+    ReadonlyArray<{ eventEncoded: LiveStoreEvent.AnyEncodedGlobal; metadata: Option.Option<SyncMetadata> }>,
+    UnexpectedError
   >
   appendEvents: (
     batch: ReadonlyArray<LiveStoreEvent.AnyEncodedGlobal>,
     createdAt: string,
-    resetStore: Effect.Effect<void, UnexpectedError>
-    // getHead: Effect.Effect<EventSequenceNumber.GlobalEventSequenceNumber, UnexpectedError>
-    }
-    
-    /**
-     * Converts a PostgreSQL table definition to a column specification string.
-    UnexpectedError
-   * @param tableDef - PostgreSQL table definition
-   * @returns Column specification string for CREATE TABLE
-  */
- const postgresTableToColumnSpec = (tableDef: PostgresTableDef): string => {
-) => Effect.Effect<void, UnexpectedError>
-  const primaryKeys: string[] = []
-  const columnDefs = tableDef.columns.map((col) => {
-    let def = `${col.name} ${col.type}`
-
-    if (col.primaryKey) {
-      primaryKeys.push(col.name)
-    }
-
-    // Primary keys are always NOT NULL, and columns are NOT NULL unless explicitly nullable: true
-    if (col.primaryKey || col.nullable !== true) {
-      def += ' NOT NULL'
-    }
-
-    return def
-  })
-
-  if (primaryKeys.length > 0) {
-    columnDefs.push(`PRIMARY KEY (${primaryKeys.join(', ')})`)
-  }
-
-  return columnDefs.join(', ')
+  ) => Effect.Effect<void, UnexpectedError>
+  resetStore: Effect.Effect<void, UnexpectedError>
 }
 
-/**
- * Creates a PostgreSQL table with a raw column specification string.
- * @param pgClient - PostgreSQL client instance
- * @param tableName - Name of the table to create
- * @param columnSpec - Raw PostgreSQL column specification string (e.g., "seqNum INTEGER PRIMARY KEY, name TEXT")
- */
-const createPostgresTable = async (pgClient: Client, tableName: string, columnSpec: string): Promise<void> => {
-  const sql = `CREATE TABLE IF NOT EXISTS ${tableName} (${columnSpec})`
-  console.log('🐘🔌 sql', sql)
-  await pgClient.query(sql)
-}
-
-const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClient: Client): SyncStorage => {
+const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string): SyncStorage => {
   const dbName = `eventlog_${PERSISTENCE_FORMAT_VERSION}_${toValidTableName(storeId)}`
 
-  const execDb = <T>(cb: (db: DB) => Promise<QueryResult<T & { rows: T[] }>>) =>
+  const execDb = <T>(cb: (db: D1Database) => Promise<D1Result<T>>) =>
     Effect.tryPromise({
-      try: () => cb(pgClient),
+      try: () => cb(env.DB),
       catch: (error) => new UnexpectedError({ cause: error, payload: { dbName } }),
     }).pipe(
-      Effect.map((_) => _.rows),
-      Effect.withSpan('@livestore/sync-cf:postgres:execDb'),
+      Effect.map((_) => _.results),
+      Effect.withSpan('@livestore/sync-cf:durable-object:execDb'),
     )
 
   // const getHead: Effect.Effect<EventSequenceNumber.GlobalEventSequenceNumber, UnexpectedError> = Effect.gen(
@@ -444,44 +349,16 @@ const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClien
     UnexpectedError
   > =>
     Effect.gen(function* () {
-      console.log('🐘🔌 getEvents, cursor', cursor)
-      const sql =
-        cursor === undefined
-          ? `SELECT * FROM ${dbName} ORDER BY seqNum ASC`
-          : `SELECT * FROM ${dbName} WHERE seqNum > ${cursor} ORDER BY seqNum ASC`
+      const whereClause = cursor === undefined ? '' : `WHERE seqNum > ${cursor}`
+      const sql = `SELECT * FROM ${dbName} ${whereClause} ORDER BY seqNum ASC`
       // TODO handle case where `cursor` was not found
-      console.log('🐘🔌 getEvents, sql', sql)
-
-      type RawEvent = {
-        seqnum: string
-        parentseqnum: string
-        name: string
-        args: string
-        createdat: string
-        clientid: string
-        sessionid: string
-      }
-
-      const rawEvents = yield* execDb<RawEvent>((db) => db.query(sql))
-      console.log('🐘🔌 getEvents, rawEvents', rawEvents)
-
-      const events: {
-        eventEncoded: LiveStoreEvent.AnyEncodedGlobal
-        metadata: Option.Option<SyncMetadata>
-      }[] = rawEvents.map((event) => ({
-        eventEncoded: {
-          seqNum: Number(event.seqnum) as EventSequenceNumber.GlobalEventSequenceNumber,
-          parentSeqNum: Number(event.parentseqnum) as EventSequenceNumber.GlobalEventSequenceNumber,
-          name: event.name,
-          args: event.args,
-          clientId: event.clientid,
-          sessionId: event.sessionid,
-        },
-        metadata: Option.some({ createdAt: event.createdat }),
-      }))
-
-      console.log('🐘🔌 getEvents, events', events)
-
+      const rawEvents = yield* execDb((db) => db.prepare(sql).all())
+      const events = Schema.decodeUnknownSync(Schema.Array(eventlogTable.rowSchema))(rawEvents).map(
+        ({ createdAt, ...eventEncoded }) => ({
+          eventEncoded,
+          metadata: Option.some({ createdAt }),
+        }),
+      )
       return events
     }).pipe(UnexpectedError.mapToUnexpectedError)
 
@@ -490,26 +367,17 @@ const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClien
       // If there are no events, do nothing.
       if (batch.length === 0) return
 
-      // PostgreSQL limits:
+      // CF D1 limits:
       // Maximum bound parameters per query	100, Maximum arguments per SQL function	32
       // Thus we need to split the batch into chunks of max (100/7=)14 events each.
       const CHUNK_SIZE = 14
-      const COLUMNS_PER_EVENT = 7
 
       for (let i = 0; i < batch.length; i += CHUNK_SIZE) {
         const chunk = batch.slice(i, i + CHUNK_SIZE)
 
-        // Create PostgreSQL-style placeholders: ($1, $2, $3, $4, $5, $6, $7), ($8, $9, ...)
-        const valuesPlaceholders = chunk
-          .map((_, eventIndex) => {
-            const startParam = eventIndex * COLUMNS_PER_EVENT + 1
-            const params = Array.from({ length: COLUMNS_PER_EVENT }, (_, j) => `$${startParam + j}`)
-            return `(${params.join(', ')})`
-          })
-          .join(', ')
-
+        // Create a list of placeholders ("(?, ?, ?, ?, ?, ?, ?)"), corresponding to each event.
+        const valuesPlaceholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')
         const sql = `INSERT INTO ${dbName} (seqNum, parentSeqNum, args, name, createdAt, clientId, sessionId) VALUES ${valuesPlaceholders}`
-        console.log('🐘🔌 sql insert', { sql, valuesPlaceholders })
         // Flatten the event properties into a parameters array.
         const params = chunk.flatMap((event) => [
           event.seqNum,
@@ -521,7 +389,12 @@ const makeStorage = (ctx: DurableObjectState, env: Env, storeId: string, pgClien
           event.sessionId,
         ])
 
-        yield* execDb((db) => db.query(sql, params))
+        yield* execDb((db) =>
+          db
+            .prepare(sql)
+            .bind(...params)
+            .run(),
+        )
       }
     }).pipe(UnexpectedError.mapToUnexpectedError)
 
