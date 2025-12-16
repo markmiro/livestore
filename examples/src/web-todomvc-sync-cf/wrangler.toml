@@ -1,7 +1,7 @@
 name = "websocket-server"
 main = "./src/cf-worker/index.ts"
 compatibility_date = "2025-05-08"
-# compatibility_flags = ["nodejs_compat"]
+compatibility_flags = ["nodejs_compat"]
 
 [[durable_objects.bindings]]
 name = "WEBSOCKET_SERVER"
