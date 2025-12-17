@@ -112,7 +112,7 @@ test.describe('TodoMVC (sync-cf)', () => {
     // Track all todos that will be added
     const todos: string[] = []
 
-    // Add 20 todos, alternating between clients
+    // Add 100 todos, alternating between clients
     for (let i = 0; i < 100; i++) {
       const clientNum = (i % 2) + 1
       const todoText = `Client ${clientNum} todo ${i} ${Date.now()}`
@@ -137,7 +137,7 @@ test.describe('TodoMVC (sync-cf)', () => {
     await page1.waitForTimeout(200)
     await page2.waitForTimeout(200)
 
-    // Verify both clients see all 20 todos
+    // Verify both clients see all 100 todos
     for (const todoText of todos) {
       const todoItem1 = page1.getByRole('listitem').filter({ hasText: todoText }).first()
       await expect(todoItem1).toBeVisible({ timeout: 10_000 })
