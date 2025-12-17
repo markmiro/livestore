@@ -11,6 +11,6 @@ bun dev
 
 ## Tests
 
-First run `docker compose up`
-
-Then run `pnpm run test`
+1. Make sure to build from the root dir `pnpm run build`
+1. Run `docker compose up` in this directory
+1. Run `pnpm run test`
