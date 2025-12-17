@@ -81,4 +81,73 @@ test.describe('TodoMVC (sync-cf)', () => {
     await context1.close()
     await context2.close()
   })
+
+  test('multi-client sync: alternating todos loop', async ({ baseURL, browser }) => {
+    if (!baseURL) throw new Error('baseURL is required')
+
+    // Generate a shared storeId so both clients sync to the same store
+    const sharedStoreId = `test-alternating-${Date.now()}`
+
+    // Create two separate browser contexts (simulating two different clients/browsers)
+    const context1 = await browser.newContext()
+    const context2 = await browser.newContext()
+
+    const page1 = await context1.newPage()
+    const page2 = await context2.newPage()
+
+    // Client 1 opens the app with the shared storeId
+    await page1.goto(`${baseURL}?storeId=${sharedStoreId}`)
+    const input1 = page1.getByPlaceholder('What needs to be done?')
+    await expect(input1).toBeVisible({ timeout: 30_000 })
+
+    // Client 2 opens the app with the same shared storeId
+    await page2.goto(`${baseURL}?storeId=${sharedStoreId}`)
+    const input2 = page2.getByPlaceholder('What needs to be done?')
+    await expect(input2).toBeVisible({ timeout: 30_000 })
+
+    // Wait a bit for both clients to initialize and sync
+    await page1.waitForTimeout(2000)
+    await page2.waitForTimeout(2000)
+
+    // Track all todos that will be added
+    const todos: string[] = []
+
+    // Add 20 todos, alternating between clients
+    for (let i = 0; i < 100; i++) {
+      const clientNum = (i % 2) + 1
+      const todoText = `Client ${clientNum} todo ${i} ${Date.now()}`
+      todos.push(todoText)
+
+      if (i % 2 === 0) {
+        // Client 1 adds a todo
+        await input1.fill(todoText)
+        await input1.press('Enter')
+      } else {
+        // Client 2 adds a todo
+        await input2.fill(todoText)
+        await input2.press('Enter')
+      }
+
+      // Small delay to allow sync
+      await page1.waitForTimeout(10)
+      await page2.waitForTimeout(10)
+    }
+
+    // Wait a bit more for final sync to complete
+    await page1.waitForTimeout(200)
+    await page2.waitForTimeout(200)
+
+    // Verify both clients see all 20 todos
+    for (const todoText of todos) {
+      const todoItem1 = page1.getByRole('listitem').filter({ hasText: todoText }).first()
+      await expect(todoItem1).toBeVisible({ timeout: 10_000 })
+
+      const todoItem2 = page2.getByRole('listitem').filter({ hasText: todoText }).first()
+      await expect(todoItem2).toBeVisible({ timeout: 10_000 })
+    }
+
+    // Clean up
+    await context1.close()
+    await context2.close()
+  })
 })
