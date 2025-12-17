@@ -2,7 +2,7 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: electric
+      POSTGRES_DB: todo-mvc-sync-postgres
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
     # We'll bind Postgres to port ${POSTGRES_PORT} in order to avoid conflicts
