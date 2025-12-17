@@ -11,12 +11,8 @@ class_name = "WebSocketServer"
 tag = "v1"
 new_classes = ["WebSocketServer"]
 
-[[d1_databases]]
-binding = "DB"
-database_name = "livestore-sync-cf-demo"
-database_id = "1c9b5dae-f1fa-49d8-83fa-7bd5b39c4121"
-# database_id = "${LIVESTORE_CF_SYNC_DATABASE_ID}"
-
 [vars]
+# PostgreSQL connection string (for local development)
+PG_CONNECTION_STRING = "postgresql://postgres:password@localhost:5432/electric?sslmode=disable"
 # should be set via CF dashboard (as secret)
 # ADMIN_SECRET = "..."
