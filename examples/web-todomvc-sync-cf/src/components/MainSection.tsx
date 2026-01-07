@@ -1,4 +1,5 @@
-import { queryDb } from '@livestore/livestore'
+import { nanoid, queryDb } from '@livestore/livestore'
+import { useSyncStatus } from '@livestore/react'
 import React from 'react'
 import { uiState$ } from '../livestore/queries.ts'
 import { events, tables } from '../livestore/schema.ts'
@@ -17,6 +18,8 @@ const visibleTodos$ = queryDb(
 
 export const MainSection: React.FC = () => {
   const store = useAppStore()
+
+  const syncStatus = useSyncStatus({ store })
 
   const toggleTodo = React.useCallback(
     ({ id, completed }: typeof tables.todos.Type) =>
@@ -44,6 +47,12 @@ export const MainSection: React.FC = () => {
           </li>
         ))}
       </ul>
+      <div>
+        <pre>{JSON.stringify(syncStatus, null, 2)}</pre>
+        <button type="button" onClick={() => store.commit(events.todoCreated({ id: nanoid(), text: 'test' }))}>
+          Add Todo
+        </button>
+      </div>
     </section>
   )
 }
