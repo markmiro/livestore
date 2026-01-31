@@ -19,12 +19,12 @@
     "@livestore/sync-cf": "workspace:*",
     "@livestore/wa-sqlite": "1.0.5-dev.2",
     "@overengineering/fps-meter": "0.1.2",
-    "@playwright/test": "^1.56.0",
     "react": "19.0.0",
     "react-dom": "19.0.0",
     "todomvc-app-css": "2.4.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.56.0",
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",

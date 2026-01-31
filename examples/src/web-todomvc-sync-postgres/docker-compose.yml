@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: todo-mvc-sync-postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    # We'll bind Postgres to port ${POSTGRES_PORT} in order to avoid conflicts
+    ports:
+      - ${POSTGRES_PORT:-5432}:5432
+    tmpfs:
+      - /var/lib/postgresql/data
+      - /tmp
+    command:
+      - -c
+      - listen_addresses=*
+      - -c
+      - wal_level=logical
+
+  pgbouncer:
+    image: cleanstart/pgbouncer:latest
+    volumes:
+      - ./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    command: ['/etc/pgbouncer/pgbouncer.ini']
+    ports:
+      - ${PGBOUNCER_PORT:-6432}:6432
+    depends_on:
+      postgres:
+        condition: service_healthy
